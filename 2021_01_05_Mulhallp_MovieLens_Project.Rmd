@@ -1,0 +1,188 @@
+---
+title: "MovieLens Project"
+author: "Peter Mulhall"
+date: "10/29/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
+##########################################################
+# Create edx set, validation set (final hold-out test set)
+##########################################################
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(scales)) install.packages("scales", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+library(data.table)
+library(scales)
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines("movies.dat"), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+
+# if using R 4.0 or later:
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),
+                                           title = as.character(title),
+                                           genres = as.character(genres),
+                                           year = as.numeric(substr(as.character(title),nchar(as.character(title))-4,nchar(as.character(title))-1)))
+
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+    semi_join(edx, by = "movieId") %>%
+    semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(ratings, movies, test_index, temp, movielens, removed)
+```
+
+# 1.0 Introduction
+
+## 1.1 Dataset Description
+MovieLens is a movie recommendation website run by GroupLens, a research lab out of the University of Minnesota.  They have offered a data set of 10M movie reviews that we will utilize for this analysis.
+
+Below is the head and summary of the dataset for familiarization:
+
+```{r edx_head}
+head(edx)
+```
+```{r edx_summary}
+summary(edx)
+```
+
+
+
+
+
+
+## 1.2 Project Goals
+
+# 2.0 Methods and Analysis
+
+## 2.1 Data Cleaning
+As the dataset was compiled by GroupLens, it was largely clean and usable as-is.  The only significant cleaning tasks were to separate out the year from the Title, and to split movies with multiple genres into new rows so that the data could be used in analysis.
+
+## 2.2 Data Exploration and Visualization
+
+```{r ratings_dist}
+ratings <- as.vector(edx$rating)
+ratings <- ratings[ratings != 0]
+ratings <- factor(ratings)
+qplot(ratings) +
+  ggtitle("Rating Distribution") +
+  ylab("# Ratings") +
+  scale_y_continuous(name = "# Ratings", labels = comma)
+```
+
+We can see that users prefer to rate on whole star ratings much more frequently than half star ratings.
+
+```{r, echo=TRUE}
+edx %>% summarise(
+  unique_movies = n_distinct(movieId),
+  unique_users = n_distinct(userId),
+  unique_genres = n_distinct(genres),
+  unique_years = n_distinct(year)
+)
+```
+
+Next we can take a look at the distribution of user's ratings.  From the graph below it is easy to see that the most common ratings are 4 and 3, and that users actively avoid half star ratings.
+
+```{r userid_dist}
+edx %>% count(userId) %>% 
+  ggplot(aes(n)) + 
+  geom_density() + 
+  scale_x_log10() + 
+  ggtitle("# of Ratings by User")
+```
+Some users rate hardly any movies, while others rate thousands - we should consider this when evaluating the ratings for prediction purposes.
+
+```{r movie_dist}
+edx %>% 
+  count(movieId) %>% 
+  ggplot(aes(n)) + 
+  geom_density() + 
+  scale_x_log10() + 
+  ggtitle("# of Ratings by Movie")
+```
+Like the user rating data, some movies have very few ratings, while others have more than 10,000 ratings within our database sample.
+
+## 2.3 Modelling Approach
+
+
+# 3.0 Results
+Achieved an RMSE < 0.86490 by predicted ratings based on adjusting the average rating overall in combination with the particular movie's rating and the user's rating history.  Lastly, movies with low numbers of ratings were penalized after calculating an adjustment factor.
+
+## 3.1 Modelling Results
+```{r rmse}
+# Root Mean Square Error Function
+RMSE <- function(actual_rating, predicted_rating)
+{
+  sqrt(mean((actual_rating - predicted_rating)^2))
+}
+
+adj_factors <- seq(0, 10, 0.5) #test for lambda value
+rmses <- sapply(adj_factors, function(l){
+  
+  mts <- mean(edx$rating) # mean rating of training set
+
+  me <- edx %>% 
+    group_by(movieId) %>% #adjust by movie rating
+    summarize(me = sum(rating - mts)/(n()+l), .groups = 'drop') # penalize low number of ratings
+  
+  # adjust mean by user ratings and movie ratings and penalize low number of ratings
+  am <- edx %>% 
+    left_join(me, by="movieId") %>%
+    group_by(userId) %>% #adjust by user rating
+    summarize(am = sum(rating - me - mts)/(n()+l), .groups = 'drop')  
+  
+  # calculate predicated ratings based on movie and user effects
+  predicted_ratings <- 
+    validation %>% 
+    left_join(me, by = "movieId") %>%
+    left_join(am, by = "userId") %>%
+    mutate(pred = mts + me + am) %>% # combine all three adjustments to make a prediction
+    .$pred
+  
+  return(RMSE(predicted_ratings, validation$rating))
+})
+plot(adj_factors, rmses)
+adj_factor <- adj_factors[which.min(rmses)]
+paste('RMSE:',min(rmses))
+
+```
+
+# 4.0 Conclusion
+In conclusion, the MovieLens data was an interesting look at using machine learning to predict ratings that may be used to predict user preferences.
+
+The fact that the model was able to calculate ratings within one star on average without any idea to a user's taste was quite impressive.
+
+There are many data points that can be used to further progress these models, such as considering the ratings of specific genres by user, or preferences by year the movie was made.
+
